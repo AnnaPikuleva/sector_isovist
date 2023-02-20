@@ -1,0 +1,331 @@
+CREATE OR REPLACE FUNCTION "public"."__sector_isovist_all"("_id_house" int8)
+  RETURNS "pg_catalog"."int4" AS $BODY$
+DECLARE
+
+	_geom geometry;
+	_boundary_union geometry;
+	_points_house geometry[];
+	_line_house geometry[];
+	_sectors geometry[];
+	_poligon_house geometry;
+	_line_house_dump_point geometry[];
+	_ugolok geometry;
+	_centre_angle float8;
+	
+
+
+	_centre_azimut float8;
+	_radius int4 := 100;
+	
+	_azimut_centre_point float8;
+	_area_sector float8;
+	_sector geometry;
+	_centre_point geometry;
+
+	_sector_big geometry;
+	
+	_angle float8 := 60.00;
+	
+	_house_merged geometry;
+	_sector_difference geometry;
+	
+	_house_x_sector geometry;
+	_point geometry;
+	_house_x_sector_points geometry[];
+		
+	_shorts_line geometry;
+	_long_line_1 geometry;
+	_long_line_2 geometry;
+	_long_line geometry;
+		
+	_i int4;
+	_n int4;
+	_onerecord record;
+		
+	_un_lines_from_house geometry;
+		
+	_poligon geometry;
+
+	_sector_one geometry;
+
+
+BEGIN
+
+			select distinct
+			
+			array_agg(st_linemerge(st_union(a.line_geom, b.line_geom))) into _line_house
+			
+			from 
+			(select  (st_dump(ST_Split(line, ST_Collect(array_agg(j.geom))))).geom as line_geom
+			from (
+			select distinct (ST_DumpPoints(st_boundary(geom))).* , st_boundary(geom) as line
+			from building_all_height_union
+			where id = _id_house) as j
+			group by line) as a
+			
+			left join 
+			
+			(select  (st_dump(ST_Split(line, ST_Collect(array_agg(j.geom))))).geom as line_geom
+			from (
+			select distinct (ST_DumpPoints(st_boundary(geom))).* , st_boundary(geom) as line
+			from building_all_height_union
+			where id = _id_house) as j
+			group by line) as b
+			
+			on st_touches(a.line_geom, b.line_geom) ;
+
+
+			_i := 0;
+
+			--берем по одному элементу из таблицы с углами 
+			FOREACH _ugolok IN ARRAY _line_house
+-- 			FOR _ugolok IN select * from line_house
+				
+						LOOP
+						begin 
+						
+-- 	
+						_i := _i + 1;
+						
+						--большой угол
+						_centre_angle = "public"."__sector_angle_"(
+							DEGREES(
+									ST_Azimuth(
+													ST_PointN(_ugolok, 2) , 
+													ST_PointN(_ugolok, 1))) , 
+							DEGREES(
+									ST_Azimuth(
+													ST_PointN(_ugolok, 2) , 
+													ST_PointN(_ugolok, -1))));
+							
+							RAISE NOTICE '_________________________________________________i %', _i;
+							
+							--азимут центральной точки большого угла
+							_centre_azimut = "public"."__sector_split_line"(
+							DEGREES(
+									ST_Azimuth(
+													ST_PointN(_ugolok, 2) , 
+													ST_PointN(_ugolok, 1))) , 
+							DEGREES(
+									ST_Azimuth(
+													ST_PointN(_ugolok, 2) , 
+													ST_PointN(_ugolok, -1))));
+		-- 									
+				-- 			--центральная точка 
+							_centre_point := ST_PointN(_ugolok, 2);
+							
+							--раздеденные сектора
+-- 							drop table if exists sector_table;
+-- 							create temp table sector_table as ( 
+-- 							 select 
+-- 							 "public"."dif_sector"(CAST(_centre_angle as float), _centre_azimut, _centre_point, 100) into _sector;
+							 
+
+											
+							_n := 0;
+							
+							
+							--берем каждый разделенный сектор отдельно
+							FOR _sector_one IN select distinct (st_dump(sector)).geom 
+							from  "public"."dif_sector"(CAST(_centre_angle as float), _centre_azimut, _centre_point, 100) as sector
+						
+										LOOP
+										begin 
+										
+										
+-- 										RAISE NOTICE '_________________________________________________n %', _n;
+										_n := _n+1;
+							
+
+										if st_area(_sector_one) < 9000.00
+														then _angle := cast(_centre_angle as int)%60.00;
+														else _angle := 60.00;
+													end if;
+										
+										
+
+										--азимут центральной точки разделенного сектора 
+										_azimut_centre_point := DEGREES(
+																							ST_Azimuth(
+																									_centre_point, 
+																									ST_PointOnSurface(
+																											ST_Intersection(
+																															ST_Boundary((ST_Buffer(_centre_point,100))::geometry(Polygon,3857)), 																											_sector_one)
+																																			))); 
+													
+-- 										RAISE NOTICE ' ------------------------------------- _azimut_centre_point %' , _azimut_centre_point;												
+
+											--дома которые попадают на территорию сектора  
+											select distinct st_union(geom)
+												into _house_merged
+												from building_all_height_union
+												where st_intersects(geom, _sector_one) 
+												and building_all_height_union.id != _id_house;
+												
+											
+											select geom into _geom from building_all_height_union where building_all_height_union.id = _id_house;
+												
+
+-- 											RAISE NOTICE ' ----------------------------------------------- _house_merged %' , _house_merged;
+											
+											--если сектор имеет пересечение с домами	
+											if st_intersection(_sector_one,_house_merged) is not null and st_area(_house_merged) > 0 													then
+											--обрезаем сектор по этим домам
+													_sector_difference := ST_Difference(ST_Difference(_sector_one, _house_merged), _geom);
+													else 
+													_sector_difference := ST_Difference(_sector_one, _geom);
+											end if;
+												
+
+												
+											DROP TABLE IF EXISTS union_line_sector;
+											CREATE TABLE union_line_sector 
+																							(union_lines_house geometry);
+-- 
+											
+																					
+-- 												
+											
+											--цикл где перебираем дома в секторе 
+											FOR _onerecord IN select * from building_all_height_union 
+											where st_intersects(geom, _sector_one)
+														
+																LOOP
+																begin
+										-- 
+																	
+																_house_x_sector := ST_Intersection(
+																												ST_Intersection(
+																													ST_MinimumBoundingCircle(_onerecord.geom), 
+																													_sector_one),
+																												_onerecord.geom);
+																												
+																						
+																	--массив крайних точек пересечения домов с секторами 
+																	SELECT array_agg(j.geom)
+																	INTO _house_x_sector_points
+																	FROM (
+																		SELECT (ST_DumpPoints(g.geom)).*
+																		FROM (SELECT _house_x_sector AS geom) AS g
+																	) j
+																	where array_agg(j.geom) is not null ;
+																	
+																	
+																	DROP TABLE IF EXISTS union_line_house;
+																	CREATE TABLE union_line_house 
+																											(lines geometry) ;
+
+																	
+																	FOREACH _point IN ARRAY _house_x_sector_points
+																						
+																						LOOP
+																				
+																						_shorts_line := st_makeline(_centre_point, _point);
+
+																						if st_touches(_shorts_line, _house_x_sector) = false then
+																							CONTINUE;
+																						end if;
+																						
+																						_long_line_1 := st_intersection(
+																							st_extend(_shorts_line, 0.0, 0.0, 10.0, 0.0), _sector_one
+																						);
+																						
+																						
+														-- -- 			-- 					
+																						if
+																							_long_line_1 is null 
+																							or
+																							st_length(_long_line_1) <= 0 or
+																							ST_GeometryType(_long_line_1) != 'ST_LineString' or
+																							st_isvalid(_long_line_1) = false 
+																						then
+																							CONTINUE;
+																						end if;
+																						
+																						_long_line_2 := st_extend(_long_line_1, 5.0, 0.0, 0.0, 0.0);
+																						
+-- 																						_long_line := st_union(ST_LineMerge(st_union(_long_line_1, _long_line_2)));
+																						
+																						_long_line := ST_LineMerge(st_union(_long_line_1, _long_line_2));
+																						
+-- 																						RAISE NOTICE ' ----------------------------------------------- _long_line %',_long_line;
+																						
+																						insert into union_line_house(lines)
+																						values (_long_line);
+													-- 					
+																		END LOOP;
+																	end;
+										-- 							
+-- 										RAISE NOTICE ' ----------------------------------------------- _un_lines_from_house %' , _un_lines_from_house;
+																	select st_union(lines) into _un_lines_from_house from union_line_house;
+																 --объединили линии около дома и сам дом 
+																	--записали эти данные во временную таблицу
+																	insert into union_line_sector(union_lines_house)
+																			values (_un_lines_from_house);
+										-- 					
+-- 											RAISE NOTICE ' ----------------------------------------------- _un_lines_from_house %',_un_lines_from_house;
+										
+												END LOOP;
+												
+												
+										
+												
+												select g.geom as geom into _poligon 
+													from (select 
+														(st_dump(
+																st_difference(
+																	_sector_difference,
+																	st_union(st_buffer(st_union(union_lines_house, _house_merged),0.01, 'quad_segs=2'))) 
+																	)).* 
+																		from union_line_sector) g 
+																			where st_touches(g.geom, _centre_point) = TRUE;
+																			
+-- 									RAISE NOTICE ' ----------------------------------------------- time %', st_asgeojson(st_transform(_poligon, 4326));
+-- 												
+
+																			
+												if st_intersection(_sector_one, _house_merged) is null 
+-- 														and st_touches(_sector_one, _house_merged) = true
+														then 
+														_poligon := _sector_one;
+-- 													then _poligon := _sector_difference;
+-- 													else _sector := _poligon;
+												end if;
+												
+												EXIT WHEN _poligon is null;
+												
+												INSERT INTO sector_main
+							-- 														(sectors_split, sectors, radius, centre_point ,angle, azimut_centre_point, id_house) 
+																					VALUES (
+																					_poligon,
+-- 																					_sector_difference, 
+																					_radius, 
+																					_centre_point, 
+																					_angle,
+																					_azimut_centre_point, 
+																					_id_house, 
+																					_i);
+												
+												
+												EXCEPTION
+													 WHEN OTHERS THEN
+															exit;
+				
+			end;
+			END LOOP;
+															
+end;
+END loop;
+
+-- end;
+
+RAISE NOTICE ' ----------------------------------------------- _id_house %', _id_house;
+
+
+RETURN _i;
+END;
+
+$BODY$
+  LANGUAGE plpgsql VOLATILE
+  COST 100
+
